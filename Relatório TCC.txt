@@ -1,0 +1,12 @@
+Relatório TCC:
+- A primeira parte de ligar a câmera deu certo, coisa básica. O erro já apareceu ao tentar instalar o Mediapipe para o reconhecimento das mãos. O código não reconhecia o diretório do arquivo e parecia não importar o .solutions.
+- foi preciso baixar o arquivo "hand_landmarker.task" e colocar na mesma pasta do projeto para que funcionasse.
+- a detecção dos pontos das mãos deu certo.
+- devido ao conflito com os métodos ".solutions" e ".task" eu decidi descartar o primeiro e fazer a montagem do esqueleto da mão na mão.
+- Como o próprio mediapipe tem treinamento de detecção de mãos imbutido nele, não será preciso adicionar o YOLO.
+- foi realizada uma tentativa de diminuir o jitter(tremor dos pontos das mãos) mas deu certo parcialmente. Os pontos ainda tremem um pouco mas nada que interfira na funcionalidade. Para isso foi criado uma deque que irá armazenar as ultimas coordenadas dos pontos e irá realizar um calculo de média móvel para reduzir o tremor.
+
+
+OBS: treinar utilizando acessórios, manda comprida, luvas
+
+-- talvez não seja viável trabalhar com possibilidade de implementar em hospitais. Talvez o mediapipe não detecte a mão utilizando luvas cirúrgicas.
