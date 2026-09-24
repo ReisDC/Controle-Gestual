@@ -40,9 +40,13 @@ class Configuracoes:
     controle_base: float = 0.80
     limite_dedos_juntos_scroll: float = 0.08
     
-    # --- CONFIGURAÇÕES DO SCROLL CONTINUO ---
-    zona_morta_scroll: float = 0.03       # Tolerancia central sem rolar
-    velocidade_maxima_scroll: int = 150    # Velocidade da rolagem do cursor
+    # --- SCROLL CONTINUO ---
+    zona_morta_scroll: float = 0.03
+    velocidade_maxima_scroll: int = 150
+
+    # --- ZOOM CONTINUO ---
+    zona_morta_zoom: float = 0.02
+    intervalo_zoom_segundos: float = 0.08
 
 
 def interpolar(atual: float, alvo: float, quantidade: float) -> float:
@@ -150,7 +154,6 @@ def dedos_indicador_e_medio_levantados_juntos(pontos_mao, config: Configuracoes)
 
     pulso = pontos_mao[0]
 
-    # 1. Verifica se indicador e medio estao BEM RETOS (distancia da ponta ao pulso bem maior que a base/junta)
     indicador_reto = (
         distancia_entre_pontos(ponta_indicador, pulso) > distancia_entre_pontos(junta_indicador, pulso) * 1.15
         and distancia_entre_pontos(ponta_indicador, pulso) > distancia_entre_pontos(base_indicador, pulso) * 1.3
@@ -161,14 +164,54 @@ def dedos_indicador_e_medio_levantados_juntos(pontos_mao, config: Configuracoes)
         and distancia_entre_pontos(ponta_medio, pulso) > distancia_entre_pontos(base_medio, pulso) * 1.3
     )
 
-    # 2. Garante que os dedos anelar e minimo NAO estao retos (evita acionar com a mao aberta)
     anelar_fechado = distancia_entre_pontos(ponta_anelar, pulso) < distancia_entre_pontos(base_anelar, pulso) * 1.2
     minimo_fechado = distancia_entre_pontos(ponta_minimo, pulso) < distancia_entre_pontos(base_minimo, pulso) * 1.2
 
-    # 3. Verifica se o indicador e o medio estao proximos
     dedos_juntos = distancia_entre_pontos(ponta_indicador, ponta_medio) < config.limite_dedos_juntos_scroll
 
     return indicador_reto and medio_reto and anelar_fechado and minimo_fechado and dedos_juntos
+
+
+def gesto_zoom_indicador_e_polegar_esticados(pontos_mao) -> bool:
+    pulso = pontos_mao[0]
+    
+    ponta_polegar = pontos_mao[4]
+    base_polegar = pontos_mao[2]
+    
+    ponta_indicador = pontos_mao[8]
+    base_indicador = pontos_mao[5]
+    
+    ponta_medio = pontos_mao[12]
+    base_medio = pontos_mao[9]
+    
+    ponta_anelar = pontos_mao[16]
+    base_anelar = pontos_mao[13]
+    
+    ponta_minimo = pontos_mao[20]
+    base_minimo = pontos_mao[17]
+
+    indicador_reto = distancia_entre_pontos(ponta_indicador, pulso) > distancia_entre_pontos(base_indicador, pulso) * 1.3
+    polegar_reto = distancia_entre_pontos(ponta_polegar, pulso) > distancia_entre_pontos(base_polegar, pulso) * 1.2
+
+    medio_dobrado = distancia_entre_pontos(ponta_medio, pulso) < distancia_entre_pontos(base_medio, pulso) * 1.2
+    anelar_dobrado = distancia_entre_pontos(ponta_anelar, pulso) < distancia_entre_pontos(base_anelar, pulso) * 1.2
+    minimo_dobrado = distancia_entre_pontos(ponta_minimo, pulso) < distancia_entre_pontos(base_minimo, pulso) * 1.2
+
+    separados = distancia_entre_pontos(ponta_indicador, ponta_polegar) > 0.08
+
+    return indicador_reto and polegar_reto and medio_dobrado and anelar_dobrado and minimo_dobrado and separados
+
+
+def executar_zoom(pyautogui, direcao: str):
+    """Executa o atalho de zoom de forma compatível com diferentes teclados (ABNT2 e US)."""
+    if direcao == "in":
+        # Dispara Zoom In
+        pyautogui.hotkey('ctrl', '+')
+        pyautogui.hotkey('ctrl', 'add')
+    elif direcao == "out":
+        # Dispara Zoom Out com variações para garantir funcionamento no ABNT2/Windows
+        pyautogui.hotkey('ctrl', '-')
+        pyautogui.hotkey('ctrl', 'subtract')
 
 
 def carregar_dependencias():
@@ -326,6 +369,9 @@ class ThreadRastreamento(threading.Thread):
         ponto_neutro_scroll_y: float | None = None
         mao_cursor_estava_visivel = False
 
+        distancia_neutra_zoom: float | None = None
+        ultimo_comando_zoom: float = 0
+
         try:
             while self.executando:
                 camera_ok, quadro = camera.read()
@@ -351,8 +397,47 @@ class ThreadRastreamento(threading.Thread):
                             elif lado == "Right":
                                 mao_gestos = hand_landmarks
 
-                # 1. MOVIMENTO DO CURSOR (MÃO ESQUERDA FÍSICA)
-                if mao_cursor is not None and indicador_esta_esticado(mao_cursor):
+                # -------------------------------------------------------------
+                # 1. VERIFICAÇÃO DO GESTO DE ZOOM (AMBAS AS MÃOS)
+                # -------------------------------------------------------------
+                gesto_zoom_ativo = False
+
+                if mao_cursor is not None and mao_gestos is not None:
+                    if gesto_zoom_indicador_e_polegar_esticados(mao_cursor) and gesto_zoom_indicador_e_polegar_esticados(mao_gestos):
+                        gesto_zoom_ativo = True
+                        
+                        distancia_atual_maos = distancia_entre_pontos(mao_cursor[5], mao_gestos[5])
+
+                        if distancia_neutra_zoom is None:
+                            distancia_neutra_zoom = distancia_atual_maos
+
+                        diferenca = distancia_atual_maos - distancia_neutra_zoom
+                        agora = time.monotonic()
+
+                        if abs(diferenca) > config.zona_morta_zoom:
+                            if agora - ultimo_comando_zoom >= config.intervalo_zoom_segundos:
+                                if diferenca > 0:
+                                    executar_zoom(pyautogui, "in")
+                                    texto_zoom = "ZOOM IN (+)"
+                                else:
+                                    executar_zoom(pyautogui, "out")
+                                    texto_zoom = "ZOOM OUT (-)"
+
+                                ultimo_comando_zoom = agora
+
+                                if SHOW_CAMERA:
+                                    cv2.putText(quadro, texto_zoom, (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 255), 3)
+                        else:
+                            if SHOW_CAMERA:
+                                cv2.putText(quadro, "ZOOM: NEUTRO", (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 0), 2)
+
+                if not gesto_zoom_ativo:
+                    distancia_neutra_zoom = None
+
+                # -------------------------------------------------------------
+                # 2. MOVIMENTO DO CURSOR
+                # -------------------------------------------------------------
+                if not gesto_zoom_ativo and mao_cursor is not None and indicador_esta_esticado(mao_cursor):
                     ponta_indicador_cursor = mao_cursor[8]
                     alvo_x, alvo_y = mapear_mao_para_tela(
                         ponta_indicador_cursor,
@@ -373,10 +458,12 @@ class ThreadRastreamento(threading.Thread):
                 else:
                     mao_cursor_estava_visivel = False
 
-                # 2. GESTOS E SCROLL CONTINUO
+                # -------------------------------------------------------------
+                # 3. GESTOS DE CLIQUE E SCROLL
+                # -------------------------------------------------------------
                 gesto_scroll_ativo = False
 
-                if mao_gestos is not None:
+                if not gesto_zoom_ativo and mao_gestos is not None:
                     ponta_indicador = mao_gestos[8]
                     ponta_medio = mao_gestos[12]
                     ponta_polegar = mao_gestos[4]
@@ -461,7 +548,9 @@ class ThreadRastreamento(threading.Thread):
                 if not gesto_scroll_ativo or mao_cursor is None:
                     ponto_neutro_scroll_y = None
 
-                # 3. DESENHO E ATUALIZAÇÃO DA JANELA INTERNA DA THREAD
+                # -------------------------------------------------------------
+                # 4. DESENHO E TRATAMENTO DE EVENTOS DA JANELA OPENCV
+                # -------------------------------------------------------------
                 if SHOW_CAMERA:
                     if mao_cursor is not None:
                         desenhar_mao(
@@ -469,7 +558,7 @@ class ThreadRastreamento(threading.Thread):
                             quadro,
                             mao_cursor,
                             self.HandLandmarksConnections.HAND_CONNECTIONS,
-                            cor_linha=(255, 150, 0),
+                            cor_linha=(255, 0, 255) if gesto_zoom_ativo else (255, 150, 0),
                         )
 
                     if mao_gestos is not None:
@@ -478,17 +567,24 @@ class ThreadRastreamento(threading.Thread):
                             quadro,
                             mao_gestos,
                             self.HandLandmarksConnections.HAND_CONNECTIONS,
-                            cor_linha=(0, 165, 255),
+                            cor_linha=(255, 0, 255) if gesto_zoom_ativo else (0, 165, 255),
                         )
 
                     desenhar_area_de_controle(cv2, quadro, config)
                     previa = redimensionar_previa(cv2, quadro, config.largura_previa)
                     
                     cv2.imshow(TITULO_JANELA, previa)
-                    tecla = cv2.waitKey(1) & 0xFF
                     
-                    if tecla == ord("q") or cv2.getWindowProperty(TITULO_JANELA, cv2.WND_PROP_VISIBLE) < 1:
+                    # Processa 1ms de eventos sem bloquear a thread
+                    tecla = cv2.waitKey(1) & 0xFF
+                    if tecla == ord("q"):
                         self.executando = False
+
+                    try:
+                        if cv2.getWindowProperty(TITULO_JANELA, cv2.WND_PROP_VISIBLE) < 1:
+                            self.executando = False
+                    except cv2.error:
+                        pass
 
         finally:
             if mouse_esta_pressionado:
