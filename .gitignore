@@ -1,0 +1,4 @@
+.hand-cursor
+__pycache__/
+*.so
+*.pyc
