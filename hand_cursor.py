@@ -17,6 +17,13 @@ os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 SHOW_CAMERA = True
 
+# Quando True (somente Windows), a janela de preview ignora cliques do mouse:
+# o clique "atravessa" a janela e vai para o que estiver atras dela. Isso evita
+# que um clique na barra de titulo/bordas da janela inicie o loop modal do
+# Windows (arrastar/redimensionar), que congela o processamento.
+# Para sair: tecla "q" na janela, Ctrl+Shift+Q (global) ou Ctrl+C no terminal.
+JANELA_ATRAVESSAVEL = False
+
 CAMINHO_MODELO = Path(__file__).with_name("models") / "hand_landmarker.task"
 TITULO_JANELA = "Hand Cursor - Preview"
 
@@ -24,7 +31,8 @@ TITULO_JANELA = "Hand Cursor - Preview"
 @dataclass(frozen=True)
 class Configuracoes:
     indice_camera: int = 0
-    suavizacao: float = 0.20
+    suavizacao: float = 0.80
+    limiar_jitter: float = 7.0
     distancia_clique: float = 0.075
     distancia_soltar: float = 0.105
     tempo_ativacao_selecao: float = 0.25
@@ -39,7 +47,11 @@ class Configuracoes:
     controle_topo: float = 0.20
     controle_base: float = 0.80
     limite_dedos_juntos_scroll: float = 0.08
-    
+
+    # --- SEGURANCA DO BOTAO DO MOUSE ---
+    # Se a mao de gestos sumir com o botao pressionado, solta apos este tempo.
+    tempo_perda_mao_soltar: float = 0.05
+
     # --- SCROLL CONTINUO ---
     zona_morta_scroll: float = 0.03
     velocidade_maxima_scroll: int = 150
@@ -101,6 +113,42 @@ def obter_limites_da_tela(pyautogui):
 
     largura, altura = pyautogui.size()
     return 0, 0, largura, altura
+
+
+def tornar_janela_atravessavel(titulo: str) -> bool:
+    """Faz a janela ignorar cliques do mouse (Windows). Retorna True se conseguiu."""
+    if platform.system() != "Windows":
+        return False
+
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.FindWindowW(None, titulo)
+    if not hwnd:
+        return False
+
+    GWL_EXSTYLE = -20
+    WS_EX_LAYERED = 0x00080000
+    WS_EX_TRANSPARENT = 0x00000020
+    LWA_ALPHA = 0x00000002
+
+    estilo = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE, estilo | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+    # Janela em camadas precisa de atributos definidos; 255 = totalmente opaca.
+    user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+    return True
+
+
+def atalho_global_de_saida() -> bool:
+    """Ctrl+Shift+Q em qualquer lugar do sistema (Windows)."""
+    if platform.system() != "Windows":
+        return False
+
+    import ctypes
+
+    get_state = ctypes.windll.user32.GetAsyncKeyState
+    VK_CONTROL, VK_SHIFT, VK_Q = 0x11, 0x10, 0x51
+    return bool(get_state(VK_CONTROL) & 0x8000 and get_state(VK_SHIFT) & 0x8000 and get_state(VK_Q) & 0x8000)
 
 
 def distancia_entre_pontos(a, b) -> float:
@@ -174,19 +222,19 @@ def dedos_indicador_e_medio_levantados_juntos(pontos_mao, config: Configuracoes)
 
 def gesto_zoom_indicador_e_polegar_esticados(pontos_mao) -> bool:
     pulso = pontos_mao[0]
-    
+
     ponta_polegar = pontos_mao[4]
     base_polegar = pontos_mao[2]
-    
+
     ponta_indicador = pontos_mao[8]
     base_indicador = pontos_mao[5]
-    
+
     ponta_medio = pontos_mao[12]
     base_medio = pontos_mao[9]
-    
+
     ponta_anelar = pontos_mao[16]
     base_anelar = pontos_mao[13]
-    
+
     ponta_minimo = pontos_mao[20]
     base_minimo = pontos_mao[17]
 
@@ -304,11 +352,30 @@ def desenhar_mao(cv2, quadro, pontos_mao, conexoes, cor_linha=(35, 190, 95)) -> 
 
 
 class ThreadRastreamento(threading.Thread):
+    """Captura, detecta gestos e controla o mouse.
+
+    IMPORTANTE: esta thread NAO chama nenhuma funcao de janela do OpenCV
+    (imshow, waitKey, namedWindow...). A janela e gerenciada pela thread
+    principal. Assim, mesmo que a janela congele (ex.: usuario clica na barra
+    de titulo), o rastreamento continua rodando e o botao do mouse nunca fica
+    preso.
+    """
+
     def __init__(self, config, dependencias):
-        super().__init__()
+        super().__init__(daemon=True)
         self.config = config
         self.cv2, self.np, self.mp, self.BaseOptions, self.HandLandmarker, self.HandLandmarkerOptions, self.HandLandmarksConnections, self.RunningMode, self.pyautogui = dependencias
         self.executando = True
+        self._trava_previa = threading.Lock()
+        self._previa = None
+
+    def obter_previa(self):
+        with self._trava_previa:
+            return self._previa
+
+    def _publicar_previa(self, previa) -> None:
+        with self._trava_previa:
+            self._previa = previa
 
     def run(self):
         pyautogui = self.pyautogui
@@ -344,14 +411,6 @@ class ThreadRastreamento(threading.Thread):
         camera.set(cv2.CAP_PROP_FPS, config.fps_camera)
         camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        if SHOW_CAMERA:
-            cv2.namedWindow(TITULO_JANELA, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(TITULO_JANELA, config.largura_previa, 720)
-            try:
-                cv2.setWindowProperty(TITULO_JANELA, cv2.WND_PROP_TOPMOST, 1)
-            except cv2.error:
-                pass
-
         detector_mao = criar_detector_de_mao(
             self.BaseOptions,
             self.HandLandmarker,
@@ -365,12 +424,14 @@ class ThreadRastreamento(threading.Thread):
         pinca_de_clique_esquerdo_estava_ativa = False
         mouse_esta_pressionado = False
         inicio_pinca_selecao: float | None = None
-        
+
         ponto_neutro_scroll_y: float | None = None
         mao_cursor_estava_visivel = False
 
         distancia_neutra_zoom: float | None = None
         ultimo_comando_zoom: float = 0
+
+        ultimo_visto_mao_gestos = time.monotonic()
 
         try:
             while self.executando:
@@ -405,7 +466,7 @@ class ThreadRastreamento(threading.Thread):
                 if mao_cursor is not None and mao_gestos is not None:
                     if gesto_zoom_indicador_e_polegar_esticados(mao_cursor) and gesto_zoom_indicador_e_polegar_esticados(mao_gestos):
                         gesto_zoom_ativo = True
-                        
+
                         distancia_atual_maos = distancia_entre_pontos(mao_cursor[5], mao_gestos[5])
 
                         if distancia_neutra_zoom is None:
@@ -452,9 +513,13 @@ class ThreadRastreamento(threading.Thread):
                         mouse_x, mouse_y = pyautogui.position()
                         mao_cursor_estava_visivel = True
 
-                    mouse_x = interpolar(mouse_x, alvo_x, config.suavizacao)
-                    mouse_y = interpolar(mouse_y, alvo_y, config.suavizacao)
-                    pyautogui.moveTo(mouse_x, mouse_y, duration=0)
+                    distancia_movimento = math.hypot(alvo_x - mouse_x, alvo_y - mouse_y)
+#jorge
+                    # Se a alteração for menor que o limiar de jitter, consideramos apenas ruído e travamos a posição
+                    if distancia_movimento > config.limiar_jitter:
+                        mouse_x = interpolar(mouse_x, alvo_x, config.suavizacao)
+                        mouse_y = interpolar(mouse_y, alvo_y, config.suavizacao)
+                        pyautogui.moveTo(mouse_x, mouse_y, duration=0)
                 else:
                     mao_cursor_estava_visivel = False
 
@@ -549,7 +614,23 @@ class ThreadRastreamento(threading.Thread):
                     ponto_neutro_scroll_y = None
 
                 # -------------------------------------------------------------
-                # 4. DESENHO E TRATAMENTO DE EVENTOS DA JANELA OPENCV
+                # 3.1 SEGURANCA: nunca deixar o botao do mouse preso
+                # Se a mao de gestos sumiu (ou o zoom assumiu) com o botao
+                # pressionado, solta depois de um curto tempo.
+                # -------------------------------------------------------------
+                if mao_gestos is not None and not gesto_zoom_ativo:
+                    ultimo_visto_mao_gestos = time.monotonic()
+                elif (
+                    mouse_esta_pressionado
+                    and time.monotonic() - ultimo_visto_mao_gestos > config.tempo_perda_mao_soltar
+                ):
+                    pyautogui.mouseUp(button="left")
+                    mouse_esta_pressionado = False
+                    pinca_de_clique_esquerdo_estava_ativa = False
+                    inicio_pinca_selecao = None
+
+                # -------------------------------------------------------------
+                # 4. DESENHO DA PREVIA (apenas desenha; quem exibe e a thread principal)
                 # -------------------------------------------------------------
                 if SHOW_CAMERA:
                     if mao_cursor is not None:
@@ -571,40 +652,74 @@ class ThreadRastreamento(threading.Thread):
                         )
 
                     desenhar_area_de_controle(cv2, quadro, config)
-                    previa = redimensionar_previa(cv2, quadro, config.largura_previa)
-                    
-                    cv2.imshow(TITULO_JANELA, previa)
-                    
-                    # Processa 1ms de eventos sem bloquear a thread
-                    tecla = cv2.waitKey(1) & 0xFF
-                    if tecla == ord("q"):
-                        self.executando = False
-
-                    try:
-                        if cv2.getWindowProperty(TITULO_JANELA, cv2.WND_PROP_VISIBLE) < 1:
-                            self.executando = False
-                    except cv2.error:
-                        pass
+                    self._publicar_previa(redimensionar_previa(cv2, quadro, config.largura_previa))
 
         finally:
             if mouse_esta_pressionado:
-                pyautogui.mouseUp()
+                pyautogui.mouseUp(button="left")
             detector_mao.close()
             camera.release()
-            if SHOW_CAMERA:
-                cv2.destroyAllWindows()
+            self.executando = False
 
     def parar(self):
         self.executando = False
 
 
+def executar_janela_previa(cv2, rastreador: ThreadRastreamento, config: Configuracoes) -> None:
+    """Loop da janela de preview. Roda na THREAD PRINCIPAL (exigencia do OpenCV/Windows)."""
+    cv2.namedWindow(TITULO_JANELA, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(TITULO_JANELA, config.largura_previa, 720)
+    try:
+        cv2.setWindowProperty(TITULO_JANELA, cv2.WND_PROP_TOPMOST, 1)
+    except cv2.error:
+        pass
+
+    janela_configurada = False
+
+    while rastreador.is_alive() and rastreador.executando:
+        previa = rastreador.obter_previa()
+
+        if previa is not None:
+            cv2.imshow(TITULO_JANELA, previa)
+
+            if not janela_configurada:
+                if JANELA_ATRAVESSAVEL and not tornar_janela_atravessavel(TITULO_JANELA):
+                    print("Aviso: nao foi possivel tornar a janela atravessavel por cliques.")
+                janela_configurada = True
+
+        tecla = cv2.waitKey(10) & 0xFF
+        if tecla == ord("q") or atalho_global_de_saida():
+            break
+
+        if janela_configurada:
+            try:
+                if cv2.getWindowProperty(TITULO_JANELA, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+            except cv2.error:
+                break
+
+
 def principal() -> None:
     dependencias = carregar_dependencias()
+    cv2 = dependencias[0]
     config = Configuracoes()
 
     thread_camera = ThreadRastreamento(config, dependencias)
     thread_camera.start()
-    thread_camera.join()
+
+    try:
+        if SHOW_CAMERA:
+            executar_janela_previa(cv2, thread_camera, config)
+        else:
+            while thread_camera.is_alive():
+                thread_camera.join(0.2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        thread_camera.parar()
+        thread_camera.join(timeout=3)
+        if SHOW_CAMERA:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
