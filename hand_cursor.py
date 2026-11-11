@@ -384,6 +384,14 @@ class ThreadRastreamento(threading.Thread):
         mp = self.mp
         config = self.config
 
+        #medidas de desempenho
+        tempo_ultimo_frame = time.monotonic()
+        fps_contador = 0
+        fps_atual = 30.0
+        tempo_acumulado_fps = 0.0
+        lista_fps = []
+        lista_latencias = []
+
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0
         pyautogui.MINIMUM_DURATION = 0
@@ -435,6 +443,15 @@ class ThreadRastreamento(threading.Thread):
 
         try:
             while self.executando:
+                inicio_ciclo = time.monotonic()
+
+                # Cálculo contínuo de FPS
+                delta_frame = inicio_ciclo - tempo_ultimo_frame
+                tempo_ultimo_frame = inicio_ciclo
+                if delta_frame > 0:
+                    fps_instantaneo = 1.0 / delta_frame
+                    fps_atual = (fps_atual * 0.8) + (fps_instantaneo * 0.2)
+
                 camera_ok, quadro = camera.read()
                 if not camera_ok:
                     break
@@ -444,7 +461,16 @@ class ThreadRastreamento(threading.Thread):
                 rgb = np.ascontiguousarray(rgb)
                 imagem = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 tempo_ms = int(time.monotonic() * 1000)
+
+                inicio_inferencia = time.monotonic()
                 resultado = detector_mao.detect_for_video(imagem, tempo_ms)
+                fim_inferencia = time.monotonic()
+
+                # Latência em milissegundos (ciclo + inferência)
+                latencia_frame_ms = (fim_inferencia - inicio_ciclo) * 1000
+
+                lista_fps.append(fps_atual)
+                lista_latencias.append(latencia_frame_ms)
 
                 mao_cursor = None
                 mao_gestos = None
@@ -514,7 +540,7 @@ class ThreadRastreamento(threading.Thread):
                         mao_cursor_estava_visivel = True
 
                     distancia_movimento = math.hypot(alvo_x - mouse_x, alvo_y - mouse_y)
-#jorge
+
                     # Se a alteração for menor que o limiar de jitter, consideramos apenas ruído e travamos a posição
                     if distancia_movimento > config.limiar_jitter:
                         mouse_x = interpolar(mouse_x, alvo_x, config.suavizacao)
@@ -652,6 +678,8 @@ class ThreadRastreamento(threading.Thread):
                         )
 
                     desenhar_area_de_controle(cv2, quadro, config)
+                    cv2.putText(quadro, f"FPS: {fps_atual:.1f} | Latencia: {latencia_frame_ms:.1f}ms", 
+                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     self._publicar_previa(redimensionar_previa(cv2, quadro, config.largura_previa))
 
         finally:
@@ -660,6 +688,16 @@ class ThreadRastreamento(threading.Thread):
             detector_mao.close()
             camera.release()
             self.executando = False
+
+            # Relatório final de FPS e latência
+            if lista_fps and lista_latencias:
+                media_fps = sum(lista_fps) / len(lista_fps)
+                media_latencia = sum(lista_latencias) / len(lista_latencias)
+                print("\n" + "="*40)
+                print("RELATÓRIO FINAL DE DESEMPENHO:")
+                print(f" FPS Médio Geral: {media_fps:.2f}")
+                print(f" Latência Média Geral: {media_latencia:.2f} ms")
+                print("="*40 + "\n")
 
     def parar(self):
         self.executando = False
