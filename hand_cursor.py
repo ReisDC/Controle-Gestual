@@ -32,7 +32,7 @@ TITULO_JANELA = "Hand Cursor - Preview"
 class Configuracoes:
     indice_camera: int = 0
     suavizacao: float = 0.80
-    limiar_jitter: float = 7.0
+    limiar_jitter: float = 15.0
     distancia_clique: float = 0.075
     distancia_soltar: float = 0.105
     tempo_ativacao_selecao: float = 0.25
