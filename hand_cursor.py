@@ -384,13 +384,16 @@ class ThreadRastreamento(threading.Thread):
         mp = self.mp
         config = self.config
 
-        #medidas de desempenho
+         # Medidas de desempenho da sessão
         tempo_ultimo_frame = time.monotonic()
-        fps_contador = 0
-        fps_atual = 30.0
-        tempo_acumulado_fps = 0.0
-        lista_fps = []
+        fps_atual = 30.0  # FPS suavizado, utilizado somente na exibição
         lista_latencias = []
+
+        tempo_inicio_sessao = time.monotonic()
+        tempo_inicio_intervalo = tempo_inicio_sessao
+        quadros_no_intervalo = 0
+        total_quadros_processados = 0
+        lista_fps_intervalos = []
 
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0
@@ -469,7 +472,6 @@ class ThreadRastreamento(threading.Thread):
                 # Latência em milissegundos (ciclo + inferência)
                 latencia_frame_ms = (fim_inferencia - inicio_ciclo) * 1000
 
-                lista_fps.append(fps_atual)
                 lista_latencias.append(latencia_frame_ms)
 
                 mao_cursor = None
@@ -682,6 +684,19 @@ class ThreadRastreamento(threading.Thread):
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                     self._publicar_previa(redimensionar_previa(cv2, quadro, config.largura_previa))
 
+                # Conta os quadros concluídos e calcula o FPS em intervalos de
+                # aproximadamente um segundo, sem utilizar o FPS suavizado.
+                total_quadros_processados += 1
+                quadros_no_intervalo += 1
+                agora_fps = time.monotonic()
+                duracao_intervalo = agora_fps - tempo_inicio_intervalo
+
+                if duracao_intervalo >= 1.0:
+                    fps_intervalo = quadros_no_intervalo / duracao_intervalo
+                    lista_fps_intervalos.append(fps_intervalo)
+                    quadros_no_intervalo = 0
+                    tempo_inicio_intervalo = agora_fps
+
         finally:
             if mouse_esta_pressionado:
                 pyautogui.mouseUp(button="left")
@@ -689,15 +704,38 @@ class ThreadRastreamento(threading.Thread):
             camera.release()
             self.executando = False
 
-            # Relatório final de FPS e latência
-            if lista_fps and lista_latencias:
-                media_fps = sum(lista_fps) / len(lista_fps)
-                media_latencia = sum(lista_latencias) / len(lista_latencias)
-                print("\n" + "="*40)
+            # Relatório final de FPS, duração da sessão e latência
+            duracao_sessao = time.monotonic() - tempo_inicio_sessao
+
+            # Inclui o último intervalo parcial quando ele tiver pelo menos
+            # meio segundo, evitando valores extremos em intervalos muito curtos.
+            duracao_intervalo_final = time.monotonic() - tempo_inicio_intervalo
+            if quadros_no_intervalo > 0 and duracao_intervalo_final >= 0.5:
+                fps_intervalo_final = quadros_no_intervalo / duracao_intervalo_final
+                lista_fps_intervalos.append(fps_intervalo_final)
+
+            if total_quadros_processados > 0 and duracao_sessao > 0:
+                # FPS médio real da sessão: total de quadros / tempo total.
+                media_fps = total_quadros_processados / duracao_sessao
+                fps_minimo = min(lista_fps_intervalos) if lista_fps_intervalos else media_fps
+                fps_maximo = max(lista_fps_intervalos) if lista_fps_intervalos else media_fps
+                media_latencia = (
+                    sum(lista_latencias) / len(lista_latencias)
+                    if lista_latencias else 0.0
+                )
+
+                minutos = int(duracao_sessao // 60)
+                segundos = duracao_sessao % 60
+
+                print("\n" + "="*45)
                 print("RELATÓRIO FINAL DE DESEMPENHO:")
-                print(f" FPS Médio Geral: {media_fps:.2f}")
-                print(f" Latência Média Geral: {media_latencia:.2f} ms")
-                print("="*40 + "\n")
+                print(f" Duração da sessão: {minutos:02d} min {segundos:05.2f} s")
+                print(f" Total de quadros processados: {total_quadros_processados}")
+                print(f" FPS médio real: {media_fps:.2f}")
+                print(f" FPS mínimo (intervalos de ~1 s): {fps_minimo:.2f}")
+                print(f" FPS máximo (intervalos de ~1 s): {fps_maximo:.2f}")
+                print(f" Latência média: {media_latencia:.2f} ms")
+                print("="*45 + "\n")
 
     def parar(self):
         self.executando = False
